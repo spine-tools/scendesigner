@@ -18,7 +18,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import argparse
 from dataclasses import dataclass
 import logging
 from typing import TypeAlias, Literal, ClassVar
@@ -31,16 +30,6 @@ import spinedb_api
 
 class ScendesignerException(Exception):
     pass
-
-
-def make_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("in_url", type=str, help="ULR of the input database")
-    parser.add_argument(
-        "config_url", type=str, help="ULR of the configuration database"
-    )
-    parser.add_argument("out_url", type=str, help="ULR of the output database")
-    return parser
 
 
 @dataclass(frozen=True)
