@@ -50,7 +50,7 @@ class TestMakeStructure:
         assert len(value_lists) == 1
         value_list = value_lists[0]
         assert value_list["name"] == "SensitivityAnalysisMethod"
-        assert value_list["parsed_value_list"] == ["Morris method"]
+        assert value_list["parsed_value_list"] == ["Morris method", "full factorial"]
 
     def test_creates_entity_classes(self, in_db_map):
         scendesigner.make_structure(in_db_map)
@@ -120,8 +120,20 @@ class TestAddEntityClassToAnalysis:
                     entity_class_name="MyClass__SensitiveParameter"
                 )
             )
-            == 1
+            == 4
         )
+        levels = config_db_map.parameter_definition(
+            entity_class_name="MyClass__SensitiveParameter", name="levels"
+        )
+        assert levels["parameter_type_list"] == ("float",)
+        positive_limit = config_db_map.parameter_definition(
+            entity_class_name="MyClass__SensitiveParameter", name="positive_limit"
+        )
+        assert positive_limit["parameter_type_list"] == ("float",)
+        negative_limit = config_db_map.parameter_definition(
+            entity_class_name="MyClass__SensitiveParameter", name="negative_limit"
+        )
+        assert negative_limit["parameter_type_list"] == ("float",)
         variability_fraction = config_db_map.parameter_definition(
             entity_class_name="MyClass__SensitiveParameter", name="variability_fraction"
         )
@@ -137,7 +149,7 @@ class TestAddEntityClassToAnalysis:
                     entity_class_name="MyClass__SensitiveParameter"
                 )
             )
-            == 1
+            == 4
         )
 
 
@@ -162,6 +174,41 @@ class TestAddVariabilityFraction:
         assert len(parameters) == 1
         assert parameters[0]["parsed_value"] == 0.1
         assert parameters[0]["alternative_name"] == "Base"
+
+
+class TestAddLimits:
+    def test_adds_entity_and_limits(self, config_db_map):
+        config_db_map.add_entity_class(name="MyClass")
+        config_db_map.add_entity(entity_class_name="MyClass", name="a")
+        scendesigner.add_parameter_to_analysis(config_db_map, "X")
+        scendesigner.add_entity_class_to_analysis(config_db_map, "MyClass")
+        scendesigner.add_entity_to_analysis(config_db_map, "MyClass", ("a",), "X")
+        scendesigner.add_limits(
+            config_db_map, "MyClass", ("a",), "X", "Base", -0.3, 0.2
+        )
+        entities = config_db_map.find_entities(
+            entity_class_name="MyClass__SensitiveParameter"
+        )
+        assert len(entities) == 1
+        assert entities[0]["entity_byname"] == ("a", "X")
+        parameters = config_db_map.find_parameter_values(
+            entity_class_name="MyClass__SensitiveParameter", entity_byname=("a", "X")
+        )
+        assert len(parameters) == 2
+        negative_limit = config_db_map.parameter_value(
+            entity_class_name="MyClass__SensitiveParameter",
+            entity_byname=("a", "X"),
+            parameter_definition_name="negative_limit",
+            alternative_name="Base",
+        )
+        assert negative_limit["parsed_value"] == -0.3
+        positive_limit = config_db_map.parameter_value(
+            entity_class_name="MyClass__SensitiveParameter",
+            entity_byname=("a", "X"),
+            parameter_definition_name="positive_limit",
+            alternative_name="Base",
+        )
+        assert positive_limit["parsed_value"] == 0.2
 
 
 class TestBuildAnalysis:
@@ -225,8 +272,25 @@ class TestBuildAnalysis:
 
 
 class TestReadMethod:
+    def test_read_full_factorial_method(self, config_db_map):
+        config_db_map.update_parameter_definition(
+            entity_class_name="SensitivityAnalysis",
+            name="method",
+            parsed_value="full factorial",
+        )
+        method = scendesigner.scendesigner.read_method(config_db_map)
+        assert isinstance(method, scendesigner.scendesigner.FullFactorialMethod)
+        assert (
+            method.n_levels
+            == config_db_map.parameter_definition(
+                entity_class_name="SensitivityAnalysis", name="levels"
+            )["parsed_value"]
+        )
+        assert isinstance(method.n_levels, int)
+
     def test_read_morris_method(self, config_db_map):
         method = scendesigner.scendesigner.read_method(config_db_map)
+        assert isinstance(method, scendesigner.scendesigner.MorrisMethod)
         assert (
             method.n_trajectories
             == config_db_map.parameter_definition(
@@ -250,21 +314,179 @@ class TestReadMethod:
         assert isinstance(method.random_seed, int)
 
 
+class TestGenerateFullFactorialSampling:
+    def test_two_levels_samples_min_and_max(self):
+        method = scendesigner.scendesigner.FullFactorialMethod(2)
+        sampling = scendesigner.scendesigner.generate_full_factorial_sampling(method, 1)
+        assert np.array_equal(sampling, np.array([[0.0], [1.0]]))
+
+    def test_multiple_levels(self):
+        method = scendesigner.scendesigner.FullFactorialMethod(4)
+        sampling = scendesigner.scendesigner.generate_full_factorial_sampling(method, 1)
+        assert np.array_equal(
+            sampling, np.array([[0.0], [1.0 / 3.0], [2.0 / 3.0], [1.0]])
+        )
+
+    def test_parameter_specific_levels(self):
+        method = scendesigner.scendesigner.FullFactorialMethod([2, 3])
+        sampling = scendesigner.scendesigner.generate_full_factorial_sampling(method)
+        assert np.array_equal(
+            sampling,
+            np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 0.5], [1.0, 0.5], [0.0, 1.0], [1.0, 1.0]]
+            ),
+        )
+
+
 class TestApplySampling:
-    def test_values(self):
+    def test_apply_to_variability_fraction(self):
         index = pd.MultiIndex.from_tuples(
             [("fish", ("Nemo",), "speed", "Base")],
             names=["entity_class", "entity", "parameter_definition", "alternative"],
         )
         parameters = pd.DataFrame(
-            {"variability_fraction": [0.2], "value": [21.0]}, index=index
+            {
+                "negative_limit": [pd.NA],
+                "positive_limit": [pd.NA],
+                "variability_fraction": [0.2],
+                "value": [21.0],
+            },
+            index=index,
+            dtype=pd.Float64Dtype(),
         )
         sampling = np.array([[0.5], [0.25], [0.75]])
         sampled = scendesigner.scendesigner.apply_sampling(parameters, sampling)
         expected = pd.DataFrame(
-            {0: [21.0], 1: [21.0 - 2.1 / 2], 2: [21.0 + 2.1 / 2]}, index=index
+            {0: [21.0], 1: [21.0 - 2.1 / 2], 2: [21.0 + 2.1 / 2]},
+            index=index,
+            dtype=pd.Float64Dtype(),
         )
         pd.testing.assert_frame_equal(sampled, expected)
+
+    def test_apply_to_positive_and_negative_limits(self):
+        index = pd.MultiIndex.from_tuples(
+            [("fish", ("Nemo",), "speed", "Base")],
+            names=["entity_class", "entity", "parameter_definition", "alternative"],
+        )
+        parameters = pd.DataFrame(
+            {
+                "negative_limit": [-2.0],
+                "positive_limit": [3.0],
+                "variability_fraction": [pd.NA],
+                "value": [21.0],
+            },
+            index=index,
+            dtype=pd.Float64Dtype(),
+        )
+        sampling = np.array([[0.0], [0.5], [1.0]])
+        sampled = scendesigner.scendesigner.apply_sampling(parameters, sampling)
+        expected = pd.DataFrame(
+            {0: [19.0], 1: [21.5], 2: [24.0]}, index=index, dtype=pd.Float64Dtype()
+        )
+        pd.testing.assert_frame_equal(sampled, expected)
+
+
+class TestReadIndividualLevelsForScenario:
+    def test_no_levels_defined(self, config_db_map):
+        alternatives = ["Base"]
+        range_config_index = pd.MultiIndex.from_tuples([("fish", ("Nemo",), "speed")])
+        levels = scendesigner.scendesigner.read_individual_levels_for_scenario(
+            config_db_map, alternatives, range_config_index
+        )
+        assert levels == [pd.NA]
+
+    def test_level_defined(self, config_db_map):
+        alternatives = ["Base"]
+        config_db_map.add_entity_class(name="fish")
+        config_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        config_db_map.add_parameter_definition(entity_class_name="fish", name="speed")
+        config_db_map.add_parameter_value(
+            entity_class_name="fish",
+            entity_byname=("Nemo",),
+            parameter_definition_name="speed",
+            alternative_name="Base",
+            parsed_value=2.3,
+        )
+        scendesigner.add_entity_class_to_analysis(config_db_map, "fish")
+        scendesigner.add_parameter_to_analysis(config_db_map, "speed")
+        scendesigner.add_entity_to_analysis(config_db_map, "fish", ("Nemo",), "speed")
+        scendesigner.add_levels(config_db_map, "fish", ("Nemo",), "speed", "Base", 32)
+        range_config_index = pd.MultiIndex.from_tuples([("fish", ("Nemo",), "speed")])
+        levels = scendesigner.scendesigner.read_individual_levels_for_scenario(
+            config_db_map, alternatives, range_config_index
+        )
+        assert levels == [32]
+        assert all(isinstance(level, int) for level in levels)
+
+
+class TestConfigValuesByScenario:
+    def test_limits_in_same_alternative(self, config_db_map):
+        config_db_map.add_entity_class(name="fish")
+        config_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        scendesigner.add_entity_class_to_analysis(config_db_map, "fish")
+        scendesigner.add_parameter_to_analysis(config_db_map, "speed")
+        scendesigner.add_entity_to_analysis(config_db_map, "fish", ("Nemo",), "speed")
+        scendesigner.add_limits(
+            config_db_map, "fish", ("Nemo",), "speed", "Base", -0.33, 0.44
+        )
+        negative_limit = config_db_map.parameter_value(
+            entity_class_name="fish__SensitiveParameter",
+            entity_byname=("Nemo", "speed"),
+            parameter_definition_name="negative_limit",
+            alternative_name="Base",
+        )
+        positive_limit = config_db_map.parameter_value(
+            entity_class_name="fish__SensitiveParameter",
+            entity_byname=("Nemo", "speed"),
+            parameter_definition_name="positive_limit",
+            alternative_name="Base",
+        )
+        range_configs = scendesigner.scendesigner.RangeConfigs(
+            {"Base": negative_limit}, {"Base": positive_limit}, {}
+        )
+        result = scendesigner.scendesigner.config_values_by_scenario(
+            ["Base"], range_configs
+        )
+        assert result is not None
+        alternative, negative_limit, positive_limit, variability_fraction = result
+        assert alternative == "Base"
+        assert negative_limit == -0.33
+        assert positive_limit == 0.44
+        assert pd.isna(variability_fraction)
+
+    def test_negative_limit_in_alternative_with_lower_index(self, config_db_map):
+        config_db_map.add_alternative(name="positive")
+        config_db_map.add_entity_class(name="fish")
+        config_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        scendesigner.add_entity_class_to_analysis(config_db_map, "fish")
+        scendesigner.add_parameter_to_analysis(config_db_map, "speed")
+        scendesigner.add_entity_to_analysis(config_db_map, "fish", ("Nemo",), "speed")
+        negative_limit = config_db_map.add_parameter_value(
+            entity_class_name="fish__SensitiveParameter",
+            entity_byname=("Nemo", "speed"),
+            parameter_definition_name="negative_limit",
+            alternative_name="Base",
+            parsed_value=-3.33,
+        )
+        positive_limit = config_db_map.add_parameter_value(
+            entity_class_name="fish__SensitiveParameter",
+            entity_byname=("Nemo", "speed"),
+            parameter_definition_name="positive_limit",
+            alternative_name="positive",
+            parsed_value=2.22,
+        )
+        range_configs = scendesigner.scendesigner.RangeConfigs(
+            {"Base": negative_limit}, {"positive": positive_limit}, {}
+        )
+        result = scendesigner.scendesigner.config_values_by_scenario(
+            ["Base", "positive"], range_configs
+        )
+        assert result is not None
+        alternative, negative_limit, positive_limit, variability_fraction = result
+        assert alternative == "Base"
+        assert negative_limit == -3.33
+        assert positive_limit == 2.22
+        assert pd.isna(variability_fraction)
 
 
 class TestReadAnalysisParametersForScenario:
@@ -295,7 +517,13 @@ class TestReadAnalysisParametersForScenario:
             names=["entity_class", "entity", "parameter_definition"],
         )
         expected = pd.DataFrame(
-            {"variability_fraction": [0.1], "value": [2.3]}, index=index
+            {
+                "negative_limit": [pd.NA],
+                "positive_limit": [pd.NA],
+                "variability_fraction": [0.1],
+                "value": [2.3],
+            },
+            index=index,
         )
         pd.testing.assert_frame_equal(parameters, expected)
 
@@ -338,7 +566,62 @@ class TestReadAnalysisParametersForScenario:
             names=["entity_class", "entity", "parameter_definition"],
         )
         expected = pd.DataFrame(
-            {"variability_fraction": [0.2], "value": [3.2]}, index=index
+            {
+                "negative_limit": [pd.NA],
+                "positive_limit": [pd.NA],
+                "variability_fraction": [0.2],
+                "value": [3.2],
+            },
+            index=index,
+        )
+        pd.testing.assert_frame_equal(parameters, expected)
+
+    def test_entity_without_parameter_values_gets_skipped(
+        self, config_db_map, in_db_map
+    ):
+        in_db_map.add_entity_class(name="fish")
+        in_db_map.add_parameter_definition(entity_class_name="fish", name="speed")
+        in_db_map.add_entity(entity_class_name="fish", name="Bruce")
+        in_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        in_db_map.add_parameter_value(
+            entity_class_name="fish",
+            entity_byname=("Bruce",),
+            parameter_definition_name="speed",
+            alternative_name="Base",
+            parsed_value=3.2,
+        )
+        in_db_map.add_parameter_value(
+            entity_class_name="fish",
+            entity_byname=("Nemo",),
+            parameter_definition_name="speed",
+            alternative_name="Base",
+            parsed_value=2.3,
+        )
+        config_db_map.add_entity_class(name="fish")
+        config_db_map.add_entity(entity_class_name="fish", name="Bruce")
+        config_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        scendesigner.add_entity_class_to_analysis(config_db_map, "fish")
+        scendesigner.add_parameter_to_analysis(config_db_map, "speed")
+        scendesigner.add_entity_to_analysis(config_db_map, "fish", ("Bruce",), "speed")
+        scendesigner.add_entity_to_analysis(config_db_map, "fish", ("Nemo",), "speed")
+        scendesigner.add_variability_fraction(
+            config_db_map, "fish", ("Nemo",), "speed", "Base", 0.1
+        )
+        parameters = scendesigner.scendesigner.read_analysis_parameters_for_scenario(
+            config_db_map, in_db_map, ["Base"]
+        )
+        index = pd.MultiIndex.from_tuples(
+            [("fish", ("Nemo",), "speed")],
+            names=["entity_class", "entity", "parameter_definition"],
+        )
+        expected = pd.DataFrame(
+            {
+                "negative_limit": [pd.NA],
+                "positive_limit": [pd.NA],
+                "variability_fraction": [0.1],
+                "value": [2.3],
+            },
+            index=index,
         )
         pd.testing.assert_frame_equal(parameters, expected)
 
@@ -395,9 +678,7 @@ class TestWriteScenarios:
 
 
 class TestMakeScenarios:
-    def test_data_gets_written_to_output_database(
-        self, config_db_map, in_db_map, out_db_map
-    ):
+    def test_default_morris_method(self, config_db_map, in_db_map, out_db_map):
         scendesigner.make_structure(config_db_map)
         in_db_map.add_entity_class(name="fish")
         in_db_map.add_parameter_definition(entity_class_name="fish", name="speed")
@@ -449,6 +730,78 @@ class TestMakeScenarios:
         method = scendesigner.scendesigner.read_method(config_db_map)
         analysed_parameter_count = 1
         expected_scenario_count = method.n_trajectories * (analysed_parameter_count + 1)
+        assert len(out_db_map.find_alternatives()) == 1 + expected_scenario_count
+        assert len(out_db_map.find_scenarios()) == expected_scenario_count
+        for i in range(expected_scenario_count):
+            assert out_db_map.scenario(name=f"MyScenario_{i + 1:03}")[
+                "alternative_name_list"
+            ] == ["Base", f"MyScenario_{i + 1:03}"]
+        assert len(out_db_map.find_entity_classes()) == 1
+        assert len(out_db_map.find_parameter_definitions()) == 1
+        assert len(out_db_map.find_entities(entity_class_name="fish")) == 1
+        assert (
+            len(
+                out_db_map.find_parameter_values(
+                    entity_class_name="fish", parameter_definition_name="speed"
+                )
+            )
+            == expected_scenario_count
+        )
+
+    def test_full_fractional_with_individual_levels(
+        self, config_db_map, in_db_map, out_db_map
+    ):
+        scendesigner.make_structure(config_db_map)
+        in_db_map.add_entity_class(name="fish")
+        in_db_map.add_parameter_definition(entity_class_name="fish", name="speed")
+        in_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        in_db_map.add_parameter_value(
+            entity_class_name="fish",
+            entity_byname=("Nemo",),
+            parameter_definition_name="speed",
+            alternative_name="Base",
+            parsed_value=3.2,
+        )
+        in_db_map.add_scenario(name="MyScenario")
+        in_db_map.add_scenario_alternative(
+            scenario_name="MyScenario", alternative_name="Base", rank=0
+        )
+        in_db_map.commit_session("Add test data.")
+        spinedb_api.filters.tools.apply_filter_stack(
+            in_db_map,
+            [spinedb_api.filters.scenario_filter.scenario_filter_config("MyScenario")],
+        )
+        config_db_map.add_entity_class(name="fish")
+        config_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        out_db_map.add_entity_class(name="fish")
+        out_db_map.add_parameter_definition(entity_class_name="fish", name="speed")
+        out_db_map.add_entity(entity_class_name="fish", name="Nemo")
+        analysis_data = [
+            scendesigner.EntityClassAnalysisData(
+                "fish",
+                [
+                    scendesigner.EntityAnalysisData(
+                        ("Nemo",),
+                        [
+                            scendesigner.ParameterAnalysisData(
+                                "speed", scendesigner.Range(-0.5, 0.5)
+                            )
+                        ],
+                    )
+                ],
+            )
+        ]
+        scendesigner.set_method(config_db_map, scendesigner.FullFactorialMethod(8))
+        scendesigner.build_analysis(
+            config_db_map, in_db_map, "MyScenario", analysis_data
+        )
+        scendesigner.add_levels(config_db_map, "fish", ("Nemo",), "speed", "Base", 2)
+        config_db_map.commit_session("Add config data.")
+        scendesigner.make_scenarios(config_db_map, in_db_map, out_db_map)
+        assert in_db_map.is_committed()
+        assert config_db_map.is_committed()
+        assert not out_db_map.is_committed()
+        expected_scenario_count = 2
         assert len(out_db_map.find_alternatives()) == 1 + expected_scenario_count
         assert len(out_db_map.find_scenarios()) == expected_scenario_count
         for i in range(expected_scenario_count):
